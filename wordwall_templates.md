@@ -1,5 +1,4 @@
-# Masha
-
+# Dir1
 ## HangMan
 
 ### My generated activity #1
@@ -8,6 +7,8 @@
 - peace :: ??
 - travel :: ??
 
+# Dir2
+## HangMan
 ### My generated activity #2
 
 - football ball :: ??
@@ -15,6 +16,8 @@
 - grass :: ??
 - european football :: ??
 
+# Dir3
+## HangMan
 ### My generated activity #3
 
 - airplane :: ??

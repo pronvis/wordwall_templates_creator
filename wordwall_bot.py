@@ -22,43 +22,56 @@ def parse_env(path: str) -> dict:
     return env
 
 
-def parse_markdown(path: str) -> tuple[str, list[dict]]:
+def parse_markdown(path: str) -> list[tuple[str, list[dict]]]:
     """
-    Returns (folder_name, templates) where:
-      - folder_name is the H1 heading (e.g. "Masha"), or "" if absent
+    Returns a list of (folder_name, templates) groups, one per H1 section.
+      - folder_name is the H1 heading (e.g. "Masha"), or "" if no H1 precedes the templates
       - templates is a list of:
         [{"type": "HangMan", "title": "My generated activity #1", "entries": [...]}]
 
-    Each # sets the folder name.
-    Each ## sets the current template type.
+    Each # starts a new group.
+    Each ## sets the current template type within the group.
     Each ### starts a new activity with that type.
     """
-    folder_name = ""
-    templates = []
+    groups: list[tuple[str, list[dict]]] = []
+    current_folder = ""
+    current_group: list[dict] = []
     current_type = ""
-    current = None
+    current: dict | None = None
+
+    def flush_template():
+        nonlocal current
+        if current:
+            current_group.append(current)
+            current = None
+
+    def flush_group():
+        nonlocal current_folder, current_group
+        flush_template()
+        if current_group:
+            groups.append((current_folder, current_group))
+        current_folder = ""
+        current_group = []
 
     for line in Path(path).read_text().splitlines():
-        # H1 heading = folder name (e.g. Masha)
+        # H1 heading = start of a new folder group
         h1 = re.match(r"^#\s+(.+)$", line)
         if h1:
-            folder_name = h1.group(1).strip()
+            flush_group()
+            current_folder = h1.group(1).strip()
             continue
 
         # H2 heading = template type (e.g. HangMan)
         h2 = re.match(r"^##\s+(.+)$", line)
         if h2:
-            if current:
-                templates.append(current)
-                current = None
+            flush_template()
             current_type = h2.group(1).strip()
             continue
 
         # H3 heading = new activity with the current type
         h3 = re.match(r"^###\s+(.+)$", line)
         if h3 and current_type:
-            if current:
-                templates.append(current)
+            flush_template()
             current = {"type": current_type, "title": h3.group(1).strip(), "entries": []}
             continue
 
@@ -67,15 +80,13 @@ def parse_markdown(path: str) -> tuple[str, list[dict]]:
         if item and current is not None:
             current["entries"].append({"word": item.group(1).strip(), "clue": item.group(2).strip()})
 
-    if current:
-        templates.append(current)
-
-    return folder_name, templates
+    flush_group()
+    return groups
 
 
 def login(page, email: str, password: str):
     print("Navigating to wordwall.net...")
-    page.goto("https://wordwall.net/")
+    page.goto("https://wordwall.net/", wait_until="commit")
     page.wait_for_load_state("networkidle")
 
     print("Clicking Log in...")
@@ -94,7 +105,7 @@ def login(page, email: str, password: str):
 def create_hangman(page, entries: list[dict], title: str = ""):
     """Create a HangMan activity on wordwall.net."""
     print("Navigating to create new activity...")
-    page.goto("https://wordwall.net/create")
+    page.goto("https://wordwall.net/create", wait_until="commit")
     page.wait_for_load_state("networkidle")
 
     print("Looking for HangMan template...")
@@ -276,16 +287,18 @@ def main():
         print("ERROR: Could not read login/password from wordwall_auth.env")
         sys.exit(1)
 
-    folder_name, templates = parse_markdown(md_path)
-    if not templates:
+    groups = parse_markdown(md_path)
+    if not groups:
         print("ERROR: No templates found in wordwall_templates.md")
         sys.exit(1)
 
-    if folder_name:
-        print(f"Folder: '{folder_name}'")
-    print(f"Found {len(templates)} template(s) to create:")
-    for t in templates:
-        print(f"  - {t['type']}: {t['title']} ({len(t['entries'])} entries)")
+    total = sum(len(templates) for _, templates in groups)
+    print(f"Found {len(groups)} group(s), {total} template(s) total:")
+    for folder_name, templates in groups:
+        label = f"'{folder_name}'" if folder_name else "(no folder)"
+        print(f"  {label}:")
+        for t in templates:
+            print(f"    - {t['type']}: {t['title']} ({len(t['entries'])} entries)")
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False, slow_mo=300)
@@ -294,19 +307,20 @@ def main():
 
         login(page, email, password)
 
-        created_titles = []
-        for template in templates:
-            ttype = template["type"].lower()
-            handler = TEMPLATE_HANDLERS.get(ttype)
-            if handler is None:
-                print(f"WARNING: No handler for template type '{template['type']}' — skipping.")
-                continue
-            print(f"\nCreating '{template['type']}' template: {template['title']}...")
-            handler(page, template["entries"], template.get("title", ""))
-            created_titles.append(template["title"])
+        for folder_name, templates in groups:
+            created_titles = []
+            for template in templates:
+                ttype = template["type"].lower()
+                handler = TEMPLATE_HANDLERS.get(ttype)
+                if handler is None:
+                    print(f"WARNING: No handler for template type '{template['type']}' — skipping.")
+                    continue
+                print(f"\nCreating '{template['type']}' template: {template['title']}...")
+                handler(page, template["entries"], template.get("title", ""))
+                created_titles.append(template["title"])
 
-        if folder_name and created_titles:
-            move_to_folder(page, folder_name, created_titles)
+            if folder_name and created_titles:
+                move_to_folder(page, folder_name, created_titles)
 
         print("\nAll done! Press Enter to close the browser.")
         input()
