@@ -1,6 +1,7 @@
 /.claude
 /debug
 /.venv
+/templates/__pycache__
 /wordwall_images
 .DS_Store
 wordwall_auth.env
