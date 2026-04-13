@@ -1,24 +1,8 @@
 # Dir1
-## HangMan
 
-### My generated activity #1
+## Image quiz
 
-- music :: ??
-- peace :: ??
-- travel :: ??
+### My generated image quiz #1
 
-# Dir2
-## HangMan
-### My generated activity #2
-
-- football ball :: ??
-- wall of bricks :: ??
-- grass :: ??
-- european football :: ??
-
-# Dir3
-## HangMan
-### My generated activity #3
-
-- airplane :: ??
-- head :: ??
+- What is number? :: <image> :: answer1 : +answer2 : answer3 : answer 4
+- What is cup? :: <image> :: answer1 : answer2 : answer3 : +answer4

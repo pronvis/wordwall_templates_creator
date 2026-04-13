@@ -26,6 +26,10 @@ IMAGE_DIR = Path("wordwall_images")
 
 TEXT_PLACEHOLDER = "??"
 IMAGE_PLACEHOLDER = "<image>"
+# Balloon pop: '<image> :: description' — generate image using the description as prompt
+BALLOON_IMAGE_PATTERN = re.compile(r"^(-\s+)<image>\s*::\s*(.+)$")
+# Image quiz: 'question :: <image> :: answers' — generate image using the question as prompt
+IMAGE_QUIZ_PATTERN = re.compile(r"^(-\s+)(.+?)\s*::\s*<image>\s*::\s*(.+)$")
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +130,15 @@ def build_image_prompt(word: str) -> str:
     return response.message.content.strip()
 
 
+def _safe_filename(text: str) -> str:
+    """Replace characters that are invalid or problematic in filenames."""
+    return re.sub(r'[\\/:*?"<>|]', "_", text).replace(" ", "_")
+
+
 def generate_image(word: str) -> str:
     """Generate an image for word, return path string."""
     IMAGE_DIR.mkdir(exist_ok=True)
-    out_path = IMAGE_DIR / f"{word}.png"
+    out_path = IMAGE_DIR / f"{_safe_filename(word)}.png"
 
     if out_path.exists():
         print(f"  Using cached image for '{word}': {out_path}")
@@ -156,10 +165,27 @@ def generate_image(word: str) -> str:
 def process(input_path: str, output_path: str):
     lines = Path(input_path).read_text().splitlines()
 
-    text_pending: dict[int, str] = {}   # line_idx -> word
-    image_pending: dict[int, str] = {}  # line_idx -> word
+    text_pending: dict[int, str] = {}         # line_idx -> word
+    image_pending: dict[int, str] = {}        # line_idx -> word
+    balloon_image_pending: dict[int, str] = {} # line_idx -> description (image prompt)
+    image_quiz_pending: dict[int, tuple[str, str]] = {}  # line_idx -> (question, answers)
 
     for idx, line in enumerate(lines):
+        # Image quiz: 'question :: <image> :: answers' — generate image from question text
+        quiz_m = IMAGE_QUIZ_PATTERN.match(line)
+        if quiz_m:
+            question = quiz_m.group(2).strip()
+            answers = quiz_m.group(3).strip()
+            image_quiz_pending[idx] = (question, answers)
+            continue
+
+        # Balloon pop: '<image> :: description' — generate image from description
+        balloon_m = BALLOON_IMAGE_PATTERN.match(line)
+        if balloon_m:
+            description = balloon_m.group(2).strip()
+            balloon_image_pending[idx] = description
+            continue
+
         m = re.match(r"^(-\s+)(.+?)\s*::\s*(.+)$", line)
         if not m:
             continue
@@ -181,6 +207,18 @@ def process(input_path: str, output_path: str):
         for idx, word in image_pending.items():
             image_paths[idx] = generate_image(word)
 
+    # --- balloon pop image clues (image generated from description) ---
+    balloon_image_paths: dict[int, str] = {}
+    if balloon_image_pending:
+        for idx, description in balloon_image_pending.items():
+            balloon_image_paths[idx] = generate_image(description)
+
+    # --- image quiz image clues (image generated from question text) ---
+    image_quiz_paths: dict[int, str] = {}
+    if image_quiz_pending:
+        for idx, (question, _) in image_quiz_pending.items():
+            image_quiz_paths[idx] = generate_image(question)
+
     # --- rebuild markdown ---
     result = []
     for idx, line in enumerate(lines):
@@ -197,6 +235,20 @@ def process(input_path: str, output_path: str):
             m = re.match(r"^(-\s+)", line)
             prefix = m.group(1) if m else "- "
             result.append(f"{prefix}{word} :: <image:{path}>")
+        elif idx in image_quiz_pending:
+            question, answers = image_quiz_pending[idx]
+            path = image_quiz_paths[idx]
+            m = re.match(r"^(-\s+)", line)
+            prefix = m.group(1) if m else "- "
+            print(f"  image quiz image for '{question}' => {path}")
+            result.append(f"{prefix}{question} :: <image:{path}> :: {answers}")
+        elif idx in balloon_image_pending:
+            description = balloon_image_pending[idx]
+            path = balloon_image_paths[idx]
+            m = re.match(r"^(-\s+)", line)
+            prefix = m.group(1) if m else "- "
+            print(f"  balloon image for '{description}' => {path}")
+            result.append(f"{prefix}<image:{path}> :: {description}")
         else:
             result.append(line)
 

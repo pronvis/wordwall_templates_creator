@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 Wordwall template automation bot.
-Reads wordwall_templates.md and wordwall_auth.env, then creates templates on wordwall.net.
+Reads a wordwall markdown file and wordwall_auth.env, then creates templates on wordwall.net.
 """
 
 import re
 import sys
 from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-CLUE_PLACEHOLDER = "??"
+
+from templates import TEMPLATE_HANDLERS
 
 
 def parse_env(path: str) -> dict:
@@ -29,8 +30,12 @@ def parse_markdown(path: str) -> list[tuple[str, list[dict]]]:
       - templates is a list of:
         [{"type": "HangMan", "title": "My generated activity #1", "entries": [...]}]
 
-    Each # starts a new group.
-    Each ## sets the current template type within the group.
+    Entry formats supported:
+      - word :: clue   →  {"word": "word", "clue": "clue"}
+      - word           →  {"word": "word", "clue": None}
+
+    Each # starts a new folder group.
+    Each ## sets the current template type.
     Each ### starts a new activity with that type.
     """
     groups: list[tuple[str, list[dict]]] = []
@@ -39,13 +44,13 @@ def parse_markdown(path: str) -> list[tuple[str, list[dict]]]:
     current_type = ""
     current: dict | None = None
 
-    def flush_template():
+    def flush_template() -> None:
         nonlocal current
         if current:
             current_group.append(current)
             current = None
 
-    def flush_group():
+    def flush_group() -> None:
         nonlocal current_folder, current_group
         flush_template()
         if current_group:
@@ -54,37 +59,49 @@ def parse_markdown(path: str) -> list[tuple[str, list[dict]]]:
         current_group = []
 
     for line in Path(path).read_text().splitlines():
-        # H1 heading = start of a new folder group
         h1 = re.match(r"^#\s+(.+)$", line)
         if h1:
             flush_group()
             current_folder = h1.group(1).strip()
             continue
 
-        # H2 heading = template type (e.g. HangMan)
         h2 = re.match(r"^##\s+(.+)$", line)
         if h2:
             flush_template()
             current_type = h2.group(1).strip()
             continue
 
-        # H3 heading = new activity with the current type
         h3 = re.match(r"^###\s+(.+)$", line)
         if h3 and current_type:
             flush_template()
             current = {"type": current_type, "title": h3.group(1).strip(), "entries": []}
             continue
 
-        # List item: "- word :: clue"
-        item = re.match(r"^-\s+(.+?)\s*::\s*(.+)$", line)
-        if item and current is not None:
-            current["entries"].append({"word": item.group(1).strip(), "clue": item.group(2).strip()})
+        if current is None:
+            continue
+
+        # Entry with clue: "- word :: clue"
+        item_with_clue = re.match(r"^-\s+(.+?)\s*::\s*(.+)$", line)
+        if item_with_clue:
+            current["entries"].append({
+                "word": item_with_clue.group(1).strip(),
+                "clue": item_with_clue.group(2).strip(),
+            })
+            continue
+
+        # Entry without clue: "- word"
+        item_no_clue = re.match(r"^-\s+(.+)$", line)
+        if item_no_clue:
+            current["entries"].append({
+                "word": item_no_clue.group(1).strip(),
+                "clue": None,
+            })
 
     flush_group()
     return groups
 
 
-def login(page, email: str, password: str):
+def login(page, email: str, password: str) -> None:
     print("Navigating to wordwall.net...")
     page.goto("https://wordwall.net/", wait_until="commit")
     page.wait_for_load_state("networkidle")
@@ -102,150 +119,55 @@ def login(page, email: str, password: str):
     print(f"Current URL after login: {page.url}")
 
 
-def create_hangman(page, entries: list[dict], title: str = ""):
-    """Create a HangMan activity on wordwall.net."""
-    print("Navigating to create new activity...")
-    page.goto("https://wordwall.net/create", wait_until="commit")
-    page.wait_for_load_state("networkidle")
-
-    print("Looking for HangMan template...")
+def _folder_exists(page, first_title: str, folder_name: str) -> bool:
+    """Open the move dialog for the first activity to check if the folder already exists."""
     try:
-        page.click("text=Hangman", timeout=5000)
-    except PlaywrightTimeout:
-        hangman = page.locator('[class*="template"]:has-text("Hang"), [class*="activity"]:has-text("Hang")')
-        hangman.first.click()
-
-    page.wait_for_load_state("networkidle")
-    print(f"URL after selecting HangMan: {page.url}")
-
-    # Set activity title if provided
-    if title:
-        print(f"Setting title: {title}")
-        try:
-            title_input = page.locator("input[type='text']").first
-            title_input.click(timeout=3000)
-            title_input.fill(title)
-        except PlaywrightTimeout:
-            print("WARNING: could not set title — taking screenshot.")
-            page.screenshot(path="debug/debug_title.png")
-
-    # Select "With clues" radio button
-    print("Selecting 'With clues' option...")
-    try:
-        page.click("label:has-text('With clues')", timeout=5000)
-    except PlaywrightTimeout:
-        try:
-            # Fallback: find radio input next to the text
-            page.locator("text=With clues").locator("..").locator("input[type='radio']").click(timeout=3000)
-        except PlaywrightTimeout:
-            print("WARNING: Could not find 'With clues' radio button — taking screenshot.")
-            page.screenshot(path="debug/debug_with_clues.png")
-            return
-
-    page.wait_for_load_state("networkidle")
-
-    def fill_contenteditable(locator, text: str):
-        """Clear and fill a contenteditable div."""
-        locator.click()
-        page.keyboard.press("Control+a")
-        page.keyboard.type(text)
-
-    # Fill in entries row by row.
-    # Only 1 row exists initially; click "+ Add a word" before each entry after the first.
-    for i, entry in enumerate(entries):
-        print(f"  Adding entry {i+1}: {entry['word']} / {entry['clue']}")
-
-        if i > 0:
-            add_btn = page.locator(".js-add-item, [class*='add-item'], [class*='add-word']").first
-            try:
-                add_btn.click(timeout=3000)
-            except PlaywrightTimeout:
-                # Fallback: find by text inside any clickable element
-                page.locator("//*[contains(text(),'Add a word')]").first.click(timeout=3000)
-            page.wait_for_timeout(400)
-
-        # Contenteditable word/clue divs, in order of appearance
-        word_divs = page.locator("div.js-item-input[data-mobile-placeholder='Word']")
-        clue_divs = page.locator("div.js-item-input[data-mobile-placeholder='Clue']")
-
-        print(f"    Word divs: {word_divs.count()}, Clue divs: {clue_divs.count()}")
-
-        try:
-            if entry["clue"] == CLUE_PLACEHOLDER:
-                print(f"  WARNING: clue for '{entry['word']}' is still '??'. Run wordwall_generate_clues.py first.")
-                continue
-
-            fill_contenteditable(word_divs.nth(i), entry["word"])
-
-            image_match = re.match(r"^<image:(.+)>$", entry["clue"])
-            if image_match:
-                image_path = image_match.group(1)
-                print(f"    Uploading image: {image_path}")
-                # Step 1: click "Add Image" span to open the modal
-                image_btn = clue_divs.nth(i).locator(
-                    "xpath=ancestor::div[contains(@class,'double-inner')]"
-                ).locator("span.js-item-image-placeholder")
-                image_btn.click(timeout=5000)
-                # Step 2: wait for modal, then click Upload and set file
-                with page.expect_file_chooser() as fc:
-                    page.locator("a#upload_image_button").click(timeout=5000)
-                fc.value.set_files(image_path)
-                page.wait_for_timeout(500)
-            else:
-                fill_contenteditable(clue_divs.nth(i), entry["clue"])
-        except Exception as e:
-            print(f"  Warning: could not fill entry {i+1}: {e}")
-            page.screenshot(path=f"debug/debug_entry_{i+1}.png")
-
-    # Save / Done
-    print("Saving activity...")
-    try:
-        page.click("text=Done", timeout=5000)
-    except PlaywrightTimeout:
-        try:
-            page.click("text=Save", timeout=5000)
-        except PlaywrightTimeout:
-            print("Could not find Save/Done button — taking screenshot for debugging.")
-            page.screenshot(path="debug/debug_save.png")
-            return
-
-    page.wait_for_load_state("networkidle")
-    print(f"Activity saved. URL: {page.url}")
+        card = page.locator(f"*:has-text('{first_title}'):has(.js-item-menu)").last
+        card.locator(".js-item-menu").first.click(timeout=5000)
+        page.wait_for_timeout(300)
+        page.locator("a.js-move-to").click(timeout=5000)
+        page.wait_for_timeout(300)
+        exists = page.locator(f".js-destination-folder-name:text('{folder_name}')").count() > 0
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        return exists
+    except Exception as e:
+        print(f"  WARNING: could not check folder existence: {e}")
+        return False
 
 
-TEMPLATE_HANDLERS = {
-    "hangman": create_hangman,
-}
-
-
-def move_to_folder(page, folder_name: str, titles: list[str]):
+def move_to_folder(page, folder_name: str, titles: list[str]) -> None:
     """Navigate to My Activity, create a folder if needed, and move the given activities into it."""
     if not folder_name or not titles:
         return
 
     print(f"\nNavigating to My Activity to move templates into folder '{folder_name}'...")
+    page.wait_for_timeout(1500)
     try:
         page.goto("https://wordwall.net/myactivities", wait_until="commit")
         page.wait_for_load_state("networkidle")
-    except Exception:
-        # Fallback: click "My Activities" link in the nav
-        page.goto("https://wordwall.net", wait_until="commit")
-        page.wait_for_load_state("networkidle")
-        page.get_by_text("My Activities").first.click(timeout=5000)
-        page.wait_for_load_state("networkidle")
+    except Exception as e:
+        print(f"  Direct navigation failed ({e}), trying homepage fallback...")
+        try:
+            page.wait_for_timeout(1000)
+            page.goto("https://wordwall.net", wait_until="commit")
+            page.wait_for_load_state("networkidle")
+            page.get_by_text("My Activities").first.click(timeout=5000)
+            page.wait_for_load_state("networkidle")
+        except Exception as e2:
+            print(f"  WARNING: Could not navigate to My Activities: {e2}")
+            page.screenshot(path="debug/debug_myactivities_nav.png")
+            return
     print(f"My Activities URL: {page.url}")
 
-    # Try to find existing folder or create a new one
-    existing_folder = page.locator(f"[class*='folder']:has-text('{folder_name}'), [class*='group']:has-text('{folder_name}')")
-    if existing_folder.count() == 0:
+    if _folder_exists(page, titles[0], folder_name):
+        print(f"Folder '{folder_name}' already exists, skipping creation.")
+    else:
         print(f"Creating new folder '{folder_name}'...")
         try:
-            # Click "+ New folder" button
             page.locator("button.js-create-folder").click(timeout=5000)
             page.wait_for_timeout(500)
-            # Fill folder name in the modal input
             page.locator(".js-modal-content input.js-input-text").fill(folder_name)
-            # Click "Create" button in the modal
             page.get_by_role("button", name="Create").click(timeout=5000)
             page.wait_for_timeout(1000)
         except PlaywrightTimeout:
@@ -253,20 +175,16 @@ def move_to_folder(page, folder_name: str, titles: list[str]):
             page.screenshot(path="debug/debug_create_folder.png")
             return
 
-    # Move each activity into the folder
     for title in titles:
         print(f"  Moving '{title}' into folder '{folder_name}'...")
         try:
-            # Find the card that contains this title and has a ⋮ menu, click the menu
             card = page.locator(f"*:has-text('{title}'):has(.js-item-menu)").last
             card.locator(".js-item-menu").first.click(timeout=5000)
             page.wait_for_timeout(300)
 
-            # Click "Move"
             page.locator("a.js-move-to").click(timeout=5000)
             page.wait_for_timeout(300)
 
-            # Select the target folder by name
             page.locator(f".js-destination-folder-name:text('{folder_name}')").click(timeout=5000)
             page.wait_for_timeout(500)
             print(f"    Moved '{title}' successfully.")
@@ -275,7 +193,7 @@ def move_to_folder(page, folder_name: str, titles: list[str]):
             page.screenshot(path=f"debug/debug_move_{title[:20].replace(' ', '_')}.png")
 
 
-def main():
+def main() -> None:
     env_path = "wordwall_auth.env"
     md_path = sys.argv[1] if len(sys.argv) > 1 else "wordwall_templates.md"
 
@@ -289,7 +207,7 @@ def main():
 
     groups = parse_markdown(md_path)
     if not groups:
-        print("ERROR: No templates found in wordwall_templates.md")
+        print("ERROR: No templates found in the markdown file")
         sys.exit(1)
 
     total = sum(len(templates) for _, templates in groups)
