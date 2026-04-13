@@ -28,6 +28,8 @@ password: yourpassword
 
 Create `wordwall_templates.md`:
 ```markdown
+# Folder name
+
 ## HangMan
 
 ### Activity title
@@ -35,10 +37,20 @@ Create `wordwall_templates.md`:
 - word1 :: manually written clue
 - word2 :: ??          # generate text clue via Ollama
 - word3 :: <image>     # generate image clue via Stable Diffusion
+
+# Another folder
+
+## HangMan
+
+### Another activity
+
+- word4 :: clue
 ```
 
+- `#` — folder name on the "My Activities" page (optional; omit to skip folder grouping)
 - `##` — template type (e.g. `HangMan`)
 - `###` — activity title (maps to "Activity Title" on wordwall)
+- Multiple `#` sections create separate folders; all activities under each `#` are moved into that folder after creation
 - Multiple `###` sections under one `##` create multiple activities
 
 ### Usage
